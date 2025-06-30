@@ -9,16 +9,15 @@ import {
   WifiOff,
   Send,
   Sprout,
-  Thermometer,
   Droplets,
   Sun,
   Activity,
-  Zap,
   Gauge,
   Leaf,
   Settings2,
   TrendingUp,
   AlertTriangle,
+  X,
 } from "lucide-react"
 import { MqttTester } from "@/components/mqtt-tester"
 
@@ -42,12 +41,9 @@ interface ChatMessage {
 }
 
 interface SensorData {
-  temperature?: number
-  humidity?: number
-  soilMoisture?: number
-  lightLevel?: number
-  pH?: number
-  nutrients?: number
+  soilHumidity?: number // H = Humedad del suelo
+  waterDistance?: number // D = Distancia del nivel del agua
+  ambientLight?: number // L = Luz del ambiente
 }
 
 export default function SmartFarmDashboard() {
@@ -58,14 +54,16 @@ export default function SmartFarmDashboard() {
   const [chatInput, setChatInput] = useState("")
   const [connectionStatus, setConnectionStatus] = useState("Desconectado")
   const [sensorData, setSensorData] = useState<SensorData>({})
+  const [showChat, setShowChat] = useState(false)
+  const [showTester, setShowTester] = useState(false)
 
   // Configuración MQTT para sistema de cultivo
   const mqttConfig = {
-    host: "5c7e9968188d442585b4d705796ecfac.s1.eu.hivemq.cloud",
-    port: 8884,
-    protocol: "wss" as const,
-    username: "Cosme",
-    password: "Upn2025UG",
+    host: process.env.NEXT_PUBLIC_MQTT_HOST || "5c7e9968188d442585b4d705796ecfac.s1.eu.hivemq.cloud",
+    port: Number.parseInt(process.env.NEXT_PUBLIC_MQTT_PORT || "8884"),
+    protocol: process.env.NEXT_PUBLIC_MQTT_PROTOCOL || "wss" as const,
+    username: process.env.NEXT_PUBLIC_MQTT_USERNAME || "Cosme",
+    password: process.env.NEXT_PUBLIC_MQTT_PASSWORD || "Upn2025UG",
     clientId: `SmartFarm_${Math.random().toString(16).substr(2, 8)}`,
     keepalive: 60,
     connectTimeout: 30000,
@@ -99,22 +97,7 @@ export default function SmartFarmDashboard() {
       setConnectionStatus("Sistema Activo")
 
       // Topics específicos para cultivo con Arduino
-      const farmTopics = [
-        "smartfarm/sensors/temperature",
-        "smartfarm/sensors/humidity",
-        "smartfarm/sensors/soil_moisture",
-        "smartfarm/sensors/light_level",
-        "smartfarm/sensors/ph",
-        "smartfarm/sensors/nutrients",
-        "smartfarm/actuators/irrigation",
-        "smartfarm/actuators/lighting",
-        "smartfarm/actuators/ventilation",
-        "smartfarm/alerts/#",
-        "Sensores/7",
-        "Sensores/ChatLog",
-        "arduino/data/#",
-        "VicUPN/farm/#",
-      ]
+      const farmTopics = ["Sensores/7", "Sensores/ChatLog"]
 
       farmTopics.forEach((topic) => {
         mqttClient.subscribe(topic, { qos: 1 }, (err) => {
@@ -186,27 +169,57 @@ export default function SmartFarmDashboard() {
     }
   }, [])
 
-  const updateSensorData = (topic: string, data: any) => {
+const updateSensorData = (topic: string, data: any) => {
     setSensorData((prev) => {
-      const newData = { ...prev }
+        const newData = { ...prev };
 
-      if (topic.includes("temperature")) {
-        newData.temperature = typeof data === "object" ? data.value || data.temperature : Number.parseFloat(data)
-      } else if (topic.includes("humidity")) {
-        newData.humidity = typeof data === "object" ? data.value || data.humidity : Number.parseFloat(data)
-      } else if (topic.includes("soil_moisture")) {
-        newData.soilMoisture = typeof data === "object" ? data.value || data.moisture : Number.parseFloat(data)
-      } else if (topic.includes("light")) {
-        newData.lightLevel = typeof data === "object" ? data.value || data.light : Number.parseFloat(data)
-      } else if (topic.includes("ph")) {
-        newData.pH = typeof data === "object" ? data.value || data.ph : Number.parseFloat(data)
-      } else if (topic.includes("nutrients")) {
-        newData.nutrients = typeof data === "object" ? data.value || data.nutrients : Number.parseFloat(data)
-      }
+        // Parsear formato H:0,D:24,L:5
+        if (topic === "Sensores/ChatLog") {
+            try {
+                const message = typeof data === "string" ? data : (data?.toString ? data.toString() : "");
 
-      return newData
-    })
-  }
+                if (!message) {
+                    console.error("Error: El mensaje está vacío o no es válido.");
+                    return newData;
+                }
+
+                const parts = message.split(",");
+
+                if (Array.isArray(parts) && parts.length > 0) {
+                    parts.forEach((part) => {
+                        if (part.includes(":")) {
+                            const [key, value] = part.split(":");
+                            const numValue = Number.parseFloat(value);
+
+                            switch (key) {
+                                case "H":
+                                    newData.soilHumidity = numValue;
+                                    break;
+                                case "D":
+                                    newData.waterDistance = numValue;
+                                    break;
+                                case "L":
+                                    newData.ambientLight = numValue;
+                                    break;
+                                default:
+                                    console.warn(`Advertencia: Clave desconocida '${key}' en el mensaje.`);
+                            }
+                        } else {
+                            console.warn(`Advertencia: El segmento '${part}' no contiene ':' y será omitido.`);
+                        }
+                    });
+                } else {
+                    console.error("Error: El mensaje no contiene datos válidos para dividir.");
+                }
+            } catch (error) {
+                console.error("Error al procesar el mensaje:", error);
+            }
+        }
+
+        return newData;
+    });
+};
+
 
   const handleChatSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -236,68 +249,40 @@ export default function SmartFarmDashboard() {
   const generateFarmBotResponse = (input: string, mqttMessages: MqttMessage[], sensors: SensorData): string => {
     const lowerInput = input.toLowerCase()
 
-    if (lowerInput.includes("temperatura")) {
-      if (sensors.temperature !== undefined) {
-        const status = sensors.temperature > 30 ? "alta" : sensors.temperature < 15 ? "baja" : "óptima"
-        return `🌡️ Temperatura actual: ${sensors.temperature}°C (${status}). Rango ideal para cultivos: 18-28°C.`
-      }
-      return "🌡️ No hay datos de temperatura disponibles. Verifica el sensor Arduino."
-    }
-
-    if (lowerInput.includes("humedad")) {
-      if (sensors.humidity !== undefined) {
-        const status = sensors.humidity > 80 ? "alta" : sensors.humidity < 40 ? "baja" : "buena"
-        return `💧 Humedad ambiental: ${sensors.humidity}% (${status}). Rango ideal: 50-70%.`
-      }
-      return "💧 No hay datos de humedad disponibles."
-    }
-
-    if (lowerInput.includes("suelo") || lowerInput.includes("tierra")) {
-      if (sensors.soilMoisture !== undefined) {
-        const status = sensors.soilMoisture > 80 ? "muy húmedo" : sensors.soilMoisture < 30 ? "seco" : "adecuado"
-        return `🌱 Humedad del suelo: ${sensors.soilMoisture}% (${status}). ${sensors.soilMoisture < 30 ? "¡Necesita riego!" : "Nivel adecuado."}`
+    if (lowerInput.includes("humedad") || lowerInput.includes("suelo")) {
+      if (sensors.soilHumidity !== undefined) {
+        const status = sensors.soilHumidity > 80 ? "muy húmedo" : sensors.soilHumidity < 30 ? "seco" : "adecuado"
+        return `🌱 Humedad del suelo: ${sensors.soilHumidity}% (${status}). ${sensors.soilHumidity < 30 ? "¡Necesita riego!" : "Nivel adecuado."}`
       }
       return "🌱 No hay datos de humedad del suelo."
     }
 
+    if (lowerInput.includes("agua") || lowerInput.includes("nivel") || lowerInput.includes("distancia")) {
+      if (sensors.waterDistance !== undefined) {
+        const status = sensors.waterDistance > 20 ? "bajo" : sensors.waterDistance < 5 ? "lleno" : "normal"
+        return `💧 Distancia del agua: ${sensors.waterDistance}cm (${status}). ${sensors.waterDistance > 20 ? "Revisar depósito de agua." : "Nivel adecuado."}`
+      }
+      return "💧 No hay datos del nivel de agua."
+    }
+
     if (lowerInput.includes("luz") || lowerInput.includes("iluminación")) {
-      if (sensors.lightLevel !== undefined) {
-        const status = sensors.lightLevel > 80 ? "excelente" : sensors.lightLevel < 30 ? "insuficiente" : "adecuada"
-        return `☀️ Nivel de luz: ${sensors.lightLevel}% (${status}). ${sensors.lightLevel < 30 ? "Considera activar iluminación artificial." : ""}`
+      if (sensors.ambientLight !== undefined) {
+        const status = sensors.ambientLight > 80 ? "excelente" : sensors.ambientLight < 30 ? "insuficiente" : "adecuada"
+        return `☀️ Luz ambiente: ${sensors.ambientLight}% (${status}). ${sensors.ambientLight < 30 ? "Considera mejorar iluminación." : ""}`
       }
-      return "☀️ No hay datos de iluminación disponibles."
-    }
-
-    if (lowerInput.includes("ph")) {
-      if (sensors.pH !== undefined) {
-        const status = sensors.pH > 7.5 ? "alcalino" : sensors.pH < 6.0 ? "ácido" : "neutro"
-        return `⚗️ pH del suelo: ${sensors.pH} (${status}). Rango ideal: 6.0-7.0.`
-      }
-      return "⚗️ No hay datos de pH disponibles."
-    }
-
-    if (lowerInput.includes("nutrientes")) {
-      if (sensors.nutrients !== undefined) {
-        const status = sensors.nutrients > 80 ? "alto" : sensors.nutrients < 30 ? "bajo" : "adecuado"
-        return `🧪 Nivel de nutrientes: ${sensors.nutrients}% (${status}). ${sensors.nutrients < 30 ? "Considera fertilizar." : ""}`
-      }
-      return "🧪 No hay datos de nutrientes disponibles."
+      return "☀️ No hay datos de luz ambiente."
     }
 
     if (lowerInput.includes("estado") || lowerInput.includes("resumen")) {
       const alerts = []
-      if (sensors.temperature && (sensors.temperature > 30 || sensors.temperature < 15)) alerts.push("temperatura")
-      if (sensors.soilMoisture && sensors.soilMoisture < 30) alerts.push("riego")
-      if (sensors.lightLevel && sensors.lightLevel < 30) alerts.push("iluminación")
+      if (sensors.soilHumidity && sensors.soilHumidity < 30) alerts.push("riego")
+      if (sensors.waterDistance && sensors.waterDistance > 20) alerts.push("agua")
+      if (sensors.ambientLight && sensors.ambientLight < 30) alerts.push("iluminación")
 
-      return `📊 Estado del cultivo: ${alerts.length === 0 ? "✅ Condiciones óptimas" : `⚠️ Atención en: ${alerts.join(", ")}`}. Mensajes recibidos: ${mqttMessages.length}.`
+      return `📊 Estado del sistema: ${alerts.length === 0 ? "✅ Todo normal" : `⚠️ Revisar: ${alerts.join(", ")}`}. Mensajes: ${mqttMessages.length}.`
     }
 
-    if (lowerInput.includes("arduino") || lowerInput.includes("sensores")) {
-      return `🔧 Sistema Arduino conectado. Sensores activos: ${Object.keys(sensors).length}. Verifica las conexiones si faltan datos.`
-    }
-
-    return `🤖 Soy tu asistente de cultivo inteligente. Pregúntame sobre: temperatura, humedad, suelo, luz, pH, nutrientes, o el estado general del sistema.`
+    return `🤖 Pregúntame sobre: humedad del suelo, nivel de agua, luz ambiente, o estado general del sistema.`
   }
 
   const getSensorStatus = (value: number | undefined, min: number, max: number) => {
@@ -309,29 +294,55 @@ export default function SmartFarmDashboard() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 via-emerald-50 to-teal-50">
-      <div className="max-w-7xl mx-auto p-6 space-y-8">
-        {/* Header Moderno */}
-        <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-green-600 via-emerald-600 to-teal-600 p-8 text-white shadow-2xl">
+      <div className="max-w-7xl mx-auto p-3 sm:p-6 space-y-4 sm:space-y-8">
+        {/* Header Móvil Optimizado */}
+        <div className="relative overflow-hidden rounded-xl sm:rounded-2xl bg-gradient-to-r from-green-600 via-emerald-600 to-teal-600 p-4 sm:p-8 text-white shadow-2xl">
           <div className="absolute inset-0 bg-black/10"></div>
-          <div className="relative flex items-center justify-between">
-            <div className="flex items-center space-x-4">
-              <div className="p-3 bg-white/20 rounded-xl backdrop-blur-sm">
-                <Sprout className="w-8 h-8" />
+          <div className="relative">
+            <div className="flex items-start justify-between mb-4 sm:mb-0">
+              <div className="flex items-center space-x-2 sm:space-x-4">
+                <div className="p-2 sm:p-3 bg-white/20 rounded-lg sm:rounded-xl backdrop-blur-sm">
+                  <Sprout className="w-6 h-6 sm:w-8 sm:h-8" />
+                </div>
+                <div>
+                  <h1 className="text-xl sm:text-4xl font-bold leading-tight">Smart Farm</h1>
+                  <p className="text-green-100 text-sm sm:text-lg">Sistema de Cultivo Inteligente</p>
+                </div>
               </div>
-              <div>
-                <h1 className="text-4xl font-bold">Smart Farm Dashboard</h1>
-                <p className="text-green-100 text-lg">Sistema de Cultivo Inteligente con Arduino</p>
+
+              {/* Botones móviles */}
+              <div className="flex flex-col sm:flex-row gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowChat(!showChat)}
+                  className="sm:hidden bg-white/20 text-white hover:bg-white/30"
+                >
+                  <Bot className="w-4 h-4 mr-1" />
+                  Chat
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowTester(!showTester)}
+                  className="sm:hidden bg-white/20 text-white hover:bg-white/30"
+                >
+                  <Settings2 className="w-4 h-4 mr-1" />
+                  Test
+                </Button>
               </div>
             </div>
-            <div className="flex items-center gap-4">
+
+            {/* Estado de conexión */}
+            <div className="flex items-center justify-center sm:justify-end">
               {isConnected ? (
-                <Badge className="bg-green-500/20 text-green-100 border-green-300/30 px-4 py-2 text-sm">
-                  <Activity className="w-4 h-4 mr-2" />
+                <Badge className="bg-green-500/20 text-green-100 border-green-300/30 px-3 py-1 text-xs sm:text-sm">
+                  <Activity className="w-3 h-3 sm:w-4 sm:h-4 mr-1 sm:mr-2" />
                   {connectionStatus}
                 </Badge>
               ) : (
-                <Badge className="bg-red-500/20 text-red-100 border-red-300/30 px-4 py-2 text-sm">
-                  <AlertTriangle className="w-4 h-4 mr-2" />
+                <Badge className="bg-red-500/20 text-red-100 border-red-300/30 px-3 py-1 text-xs sm:text-sm">
+                  <AlertTriangle className="w-3 h-3 sm:w-4 sm:h-4 mr-1 sm:mr-2" />
                   {connectionStatus}
                 </Badge>
               )}
@@ -339,216 +350,152 @@ export default function SmartFarmDashboard() {
           </div>
         </div>
 
-        {/* Métricas de Sensores */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-6">
-          {/* Temperatura */}
-          <Card className="relative overflow-hidden border-0 shadow-lg bg-gradient-to-br from-orange-50 to-red-50">
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-orange-600">Temperatura</p>
-                  <p className="text-3xl font-bold text-orange-800">{sensorData.temperature?.toFixed(1) || "--"}°C</p>
-                </div>
-                <div className="p-3 bg-orange-100 rounded-xl">
-                  <Thermometer className="w-6 h-6 text-orange-600" />
-                </div>
-              </div>
-              <div
-                className={`mt-2 text-xs px-2 py-1 rounded-full inline-block ${
-                  getSensorStatus(sensorData.temperature, 18, 28) === "optimo"
-                    ? "bg-green-100 text-green-700"
-                    : getSensorStatus(sensorData.temperature, 18, 28) === "alto"
-                      ? "bg-red-100 text-red-700"
-                      : getSensorStatus(sensorData.temperature, 18, 28) === "bajo"
-                        ? "bg-blue-100 text-blue-700"
-                        : "bg-gray-100 text-gray-700"
-                }`}
-              >
-                {getSensorStatus(sensorData.temperature, 18, 28) === "optimo"
-                  ? "✅ Óptima"
-                  : getSensorStatus(sensorData.temperature, 18, 28) === "alto"
-                    ? "🔥 Alta"
-                    : getSensorStatus(sensorData.temperature, 18, 28) === "bajo"
-                      ? "❄️ Baja"
-                      : "⚪ Sin datos"}
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Humedad */}
-          <Card className="relative overflow-hidden border-0 shadow-lg bg-gradient-to-br from-blue-50 to-cyan-50">
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-blue-600">Humedad</p>
-                  <p className="text-3xl font-bold text-blue-800">{sensorData.humidity?.toFixed(1) || "--"}%</p>
-                </div>
-                <div className="p-3 bg-blue-100 rounded-xl">
-                  <Droplets className="w-6 h-6 text-blue-600" />
-                </div>
-              </div>
-              <div
-                className={`mt-2 text-xs px-2 py-1 rounded-full inline-block ${
-                  getSensorStatus(sensorData.humidity, 50, 70) === "optimo"
-                    ? "bg-green-100 text-green-700"
-                    : "bg-yellow-100 text-yellow-700"
-                }`}
-              >
-                {getSensorStatus(sensorData.humidity, 50, 70) === "optimo" ? "✅ Buena" : "⚠️ Revisar"}
-              </div>
-            </CardContent>
-          </Card>
-
+        {/* Métricas de Sensores - Solo 3 sensores */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-6">
           {/* Humedad del Suelo */}
           <Card className="relative overflow-hidden border-0 shadow-lg bg-gradient-to-br from-amber-50 to-yellow-50">
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-amber-600">Suelo</p>
-                  <p className="text-3xl font-bold text-amber-800">{sensorData.soilMoisture?.toFixed(1) || "--"}%</p>
+            <CardContent className="p-3 sm:p-6">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between">
+                <div className="mb-2 sm:mb-0">
+                  <p className="text-xs sm:text-sm font-medium text-amber-600">Humedad Suelo</p>
+                  <p className="text-lg sm:text-3xl font-bold text-amber-800">
+                    {sensorData.soilHumidity?.toFixed(1) || "--"}
+                    <span className="text-sm sm:text-lg">%</span>
+                  </p>
                 </div>
-                <div className="p-3 bg-amber-100 rounded-xl">
-                  <Leaf className="w-6 h-6 text-amber-600" />
+                <div className="p-2 sm:p-3 bg-amber-100 rounded-lg sm:rounded-xl self-end sm:self-auto">
+                  <Leaf className="w-4 h-4 sm:w-6 sm:h-6 text-amber-600" />
                 </div>
               </div>
               <div
                 className={`mt-2 text-xs px-2 py-1 rounded-full inline-block ${
-                  getSensorStatus(sensorData.soilMoisture, 30, 80) === "optimo"
+                  getSensorStatus(sensorData.soilHumidity, 30, 80) === "optimo"
                     ? "bg-green-100 text-green-700"
-                    : getSensorStatus(sensorData.soilMoisture, 30, 80) === "bajo"
+                    : getSensorStatus(sensorData.soilHumidity, 30, 80) === "bajo"
                       ? "bg-red-100 text-red-700"
                       : "bg-blue-100 text-blue-700"
                 }`}
               >
-                {getSensorStatus(sensorData.soilMoisture, 30, 80) === "optimo"
+                {getSensorStatus(sensorData.soilHumidity, 30, 80) === "optimo"
                   ? "✅ Húmedo"
-                  : getSensorStatus(sensorData.soilMoisture, 30, 80) === "bajo"
+                  : getSensorStatus(sensorData.soilHumidity, 30, 80) === "bajo"
                     ? "🚨 Regar"
                     : "💧 Muy húmedo"}
               </div>
             </CardContent>
           </Card>
 
-          {/* Luz */}
-          <Card className="relative overflow-hidden border-0 shadow-lg bg-gradient-to-br from-yellow-50 to-orange-50">
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-yellow-600">Luz</p>
-                  <p className="text-3xl font-bold text-yellow-800">{sensorData.lightLevel?.toFixed(0) || "--"}%</p>
+          {/* Distancia Agua */}
+          <Card className="relative overflow-hidden border-0 shadow-lg bg-gradient-to-br from-blue-50 to-cyan-50">
+            <CardContent className="p-3 sm:p-6">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between">
+                <div className="mb-2 sm:mb-0">
+                  <p className="text-xs sm:text-sm font-medium text-blue-600">Nivel Agua</p>
+                  <p className="text-lg sm:text-3xl font-bold text-blue-800">
+                    {sensorData.waterDistance?.toFixed(1) || "--"}
+                    <span className="text-sm sm:text-lg">cm</span>
+                  </p>
                 </div>
-                <div className="p-3 bg-yellow-100 rounded-xl">
-                  <Sun className="w-6 h-6 text-yellow-600" />
+                <div className="p-2 sm:p-3 bg-blue-100 rounded-lg sm:rounded-xl self-end sm:self-auto">
+                  <Droplets className="w-4 h-4 sm:w-6 sm:h-6 text-blue-600" />
                 </div>
               </div>
               <div
                 className={`mt-2 text-xs px-2 py-1 rounded-full inline-block ${
-                  getSensorStatus(sensorData.lightLevel, 30, 100) === "optimo"
+                  getSensorStatus(sensorData.waterDistance, 5, 20) === "optimo"
+                    ? "bg-green-100 text-green-700"
+                    : getSensorStatus(sensorData.waterDistance, 5, 20) === "alto"
+                      ? "bg-red-100 text-red-700"
+                      : "bg-yellow-100 text-yellow-700"
+                }`}
+              >
+                {getSensorStatus(sensorData.waterDistance, 5, 20) === "optimo"
+                  ? "✅ Normal"
+                  : getSensorStatus(sensorData.waterDistance, 5, 20) === "alto"
+                    ? "⚠️ Bajo"
+                    : "💧 Lleno"}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Luz Ambiente */}
+          <Card className="relative overflow-hidden border-0 shadow-lg bg-gradient-to-br from-yellow-50 to-orange-50">
+            <CardContent className="p-3 sm:p-6">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between">
+                <div className="mb-2 sm:mb-0">
+                  <p className="text-xs sm:text-sm font-medium text-yellow-600">Luz Ambiente</p>
+                  <p className="text-lg sm:text-3xl font-bold text-yellow-800">
+                    {sensorData.ambientLight?.toFixed(0) || "--"}
+                    <span className="text-sm sm:text-lg">%</span>
+                  </p>
+                </div>
+                <div className="p-2 sm:p-3 bg-yellow-100 rounded-lg sm:rounded-xl self-end sm:self-auto">
+                  <Sun className="w-4 h-4 sm:w-6 sm:h-6 text-yellow-600" />
+                </div>
+              </div>
+              <div
+                className={`mt-2 text-xs px-2 py-1 rounded-full inline-block ${
+                  getSensorStatus(sensorData.ambientLight, 30, 100) === "optimo"
                     ? "bg-green-100 text-green-700"
                     : "bg-orange-100 text-orange-700"
                 }`}
               >
-                {getSensorStatus(sensorData.lightLevel, 30, 100) === "optimo" ? "☀️ Buena" : "💡 Insuficiente"}
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* pH */}
-          <Card className="relative overflow-hidden border-0 shadow-lg bg-gradient-to-br from-purple-50 to-pink-50">
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-purple-600">pH</p>
-                  <p className="text-3xl font-bold text-purple-800">{sensorData.pH?.toFixed(1) || "--"}</p>
-                </div>
-                <div className="p-3 bg-purple-100 rounded-xl">
-                  <Gauge className="w-6 h-6 text-purple-600" />
-                </div>
-              </div>
-              <div
-                className={`mt-2 text-xs px-2 py-1 rounded-full inline-block ${
-                  getSensorStatus(sensorData.pH, 6.0, 7.0) === "optimo"
-                    ? "bg-green-100 text-green-700"
-                    : "bg-yellow-100 text-yellow-700"
-                }`}
-              >
-                {getSensorStatus(sensorData.pH, 6.0, 7.0) === "optimo" ? "⚖️ Neutro" : "⚗️ Ajustar"}
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Nutrientes */}
-          <Card className="relative overflow-hidden border-0 shadow-lg bg-gradient-to-br from-emerald-50 to-green-50">
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium text-emerald-600">Nutrientes</p>
-                  <p className="text-3xl font-bold text-emerald-800">{sensorData.nutrients?.toFixed(0) || "--"}%</p>
-                </div>
-                <div className="p-3 bg-emerald-100 rounded-xl">
-                  <Zap className="w-6 h-6 text-emerald-600" />
-                </div>
-              </div>
-              <div
-                className={`mt-2 text-xs px-2 py-1 rounded-full inline-block ${
-                  getSensorStatus(sensorData.nutrients, 30, 100) === "optimo"
-                    ? "bg-green-100 text-green-700"
-                    : "bg-red-100 text-red-700"
-                }`}
-              >
-                {getSensorStatus(sensorData.nutrients, 30, 100) === "optimo" ? "🌿 Bueno" : "🧪 Fertilizar"}
+                {getSensorStatus(sensorData.ambientLight, 30, 100) === "optimo" ? "☀️ Buena" : "💡 Insuficiente"}
               </div>
             </CardContent>
           </Card>
         </div>
 
-        {/* Probador de Conexión */}
-        <MqttTester />
+        {/* Probador de Conexión - Solo visible cuando se activa */}
+        {showTester && <MqttTester />}
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {/* Layout Principal - Responsive */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-8">
           {/* Panel de Datos en Tiempo Real */}
-          <div className="lg:col-span-2">
+          <div className="lg:col-span-2 order-2 lg:order-1">
             <Card className="border-0 shadow-xl bg-white/80 backdrop-blur-sm">
-              <CardHeader className="bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-t-lg">
-                <CardTitle className="flex items-center gap-3">
-                  <TrendingUp className="w-6 h-6" />
+              <CardHeader className="bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-t-lg p-4 sm:p-6">
+                <CardTitle className="flex items-center gap-2 sm:gap-3 text-lg sm:text-xl">
+                  <TrendingUp className="w-5 h-5 sm:w-6 sm:h-6" />
                   Datos en Tiempo Real
                 </CardTitle>
-                <CardDescription className="text-green-100">
+                <CardDescription className="text-green-100 text-sm">
                   Información recibida desde tus sensores Arduino
                 </CardDescription>
               </CardHeader>
-              <CardContent className="p-6">
-                <ScrollArea className="h-96">
+              <CardContent className="p-3 sm:p-6">
+                <ScrollArea className="h-64 sm:h-96">
                   {messages.length === 0 ? (
-                    <div className="text-center text-gray-500 py-12">
-                      <div className="p-4 bg-green-50 rounded-xl inline-block mb-4">
-                        <Settings2 className="w-12 h-12 text-green-500" />
+                    <div className="text-center text-gray-500 py-8 sm:py-12">
+                      <div className="p-3 sm:p-4 bg-green-50 rounded-xl inline-block mb-3 sm:mb-4">
+                        <Settings2 className="w-8 h-8 sm:w-12 sm:h-12 text-green-500" />
                       </div>
-                      <p className="text-lg font-medium">Esperando datos de Arduino...</p>
-                      <p className="text-sm mt-2">Verifica que tu sistema esté enviando datos a los topics correctos</p>
-                      <div className="mt-4 text-xs bg-blue-50 p-3 rounded-lg">
+                      <p className="text-base sm:text-lg font-medium">Esperando datos de Arduino...</p>
+                      <p className="text-xs sm:text-sm mt-2">
+                        Verifica que tu sistema esté enviando datos a los topics correctos
+                      </p>
+                      <div className="mt-3 sm:mt-4 text-xs bg-blue-50 p-2 sm:p-3 rounded-lg">
                         <p className="font-medium text-blue-800">Topics esperados:</p>
-                        <p className="text-blue-600">smartfarm/sensors/*, arduino/data/*, VicUPN/farm/*</p>
+                        <p className="text-blue-600 break-all">smartfarm/sensors/*, arduino/data/*, VicUPN/farm/*</p>
                       </div>
                     </div>
                   ) : (
-                    <div className="space-y-4">
+                    <div className="space-y-3 sm:space-y-4">
                       {messages.map((msg, index) => (
                         <div
                           key={index}
-                          className="border border-green-100 rounded-xl p-4 bg-gradient-to-r from-white to-green-50/30"
+                          className="border border-green-100 rounded-lg sm:rounded-xl p-3 sm:p-4 bg-gradient-to-r from-white to-green-50/30"
                         >
-                          <div className="flex items-center justify-between mb-3">
-                            <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">
-                              {msg.topic}
+                          <div className="flex items-center justify-between mb-2 sm:mb-3">
+                            <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 text-xs">
+                              <span className="truncate max-w-[120px] sm:max-w-none">{msg.topic}</span>
                             </Badge>
-                            <span className="text-xs text-gray-500 bg-gray-50 px-2 py-1 rounded-full">
+                            <span className="text-xs text-gray-500 bg-gray-50 px-2 py-1 rounded-full whitespace-nowrap">
                               {msg.timestamp.toLocaleTimeString()}
                             </span>
                           </div>
-                          <div className="bg-gray-50 p-3 rounded-lg">
-                            <p className="text-sm font-mono text-gray-800">{msg.message}</p>
+                          <div className="bg-gray-50 p-2 sm:p-3 rounded-lg">
+                            <p className="text-xs sm:text-sm font-mono text-gray-800 break-all">{msg.message}</p>
                           </div>
                         </div>
                       ))}
@@ -559,22 +506,34 @@ export default function SmartFarmDashboard() {
             </Card>
           </div>
 
-          {/* Asistente IA */}
-          <div>
+          {/* Asistente IA - Responsive */}
+          <div className={`order-1 lg:order-2 ${showChat ? "block" : "hidden lg:block"}`}>
             <Card className="border-0 shadow-xl bg-white/80 backdrop-blur-sm h-fit">
-              <CardHeader className="bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-t-lg">
-                <CardTitle className="flex items-center gap-3">
-                  <Bot className="w-6 h-6" />
-                  Asistente Agrícola IA
+              <CardHeader className="bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-t-lg p-4 sm:p-6">
+                <CardTitle className="flex items-center justify-between text-lg sm:text-xl">
+                  <div className="flex items-center gap-2 sm:gap-3">
+                    <Bot className="w-5 h-5 sm:w-6 sm:h-6" />
+                    Asistente IA
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowChat(false)}
+                    className="lg:hidden text-white hover:bg-white/20"
+                  >
+                    <X className="w-4 h-4" />
+                  </Button>
                 </CardTitle>
-                <CardDescription className="text-blue-100">Consulta sobre el estado de tus cultivos</CardDescription>
+                <CardDescription className="text-blue-100 text-sm">
+                  Consulta sobre el estado de tus cultivos
+                </CardDescription>
               </CardHeader>
-              <CardContent className="p-6">
-                <ScrollArea className="h-64 mb-6">
+              <CardContent className="p-3 sm:p-6">
+                <ScrollArea className="h-48 sm:h-64 mb-4 sm:mb-6">
                   {chatMessages.length === 0 ? (
-                    <div className="text-center text-gray-500 py-8">
-                      <div className="p-3 bg-blue-50 rounded-xl inline-block mb-3">
-                        <Bot className="w-8 h-8 text-blue-500" />
+                    <div className="text-center text-gray-500 py-6 sm:py-8">
+                      <div className="p-2 sm:p-3 bg-blue-50 rounded-xl inline-block mb-2 sm:mb-3">
+                        <Bot className="w-6 h-6 sm:w-8 sm:h-8 text-blue-500" />
                       </div>
                       <p className="text-sm font-medium">¡Hola! Soy tu asistente de cultivo inteligente.</p>
                       <p className="text-xs mt-2 text-gray-400">
@@ -582,11 +541,11 @@ export default function SmartFarmDashboard() {
                       </p>
                     </div>
                   ) : (
-                    <div className="space-y-3">
+                    <div className="space-y-2 sm:space-y-3">
                       {chatMessages.map((msg, index) => (
                         <div key={index} className={`flex ${msg.type === "user" ? "justify-end" : "justify-start"}`}>
                           <div
-                            className={`max-w-[85%] rounded-xl p-3 text-sm ${
+                            className={`max-w-[85%] rounded-xl p-2 sm:p-3 text-xs sm:text-sm ${
                               msg.type === "user"
                                 ? "bg-gradient-to-r from-green-500 to-emerald-500 text-white"
                                 : "bg-gray-100 text-gray-800 border border-gray-200"
@@ -600,18 +559,19 @@ export default function SmartFarmDashboard() {
                   )}
                 </ScrollArea>
 
-                <Separator className="mb-4" />
+                <Separator className="mb-3 sm:mb-4" />
 
                 <form onSubmit={handleChatSubmit} className="flex gap-2">
                   <Input
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
                     placeholder="Pregunta sobre tus cultivos..."
-                    className="flex-1 border-green-200 focus:border-green-400"
+                    className="flex-1 border-green-200 focus:border-green-400 text-sm"
                   />
                   <Button
                     type="submit"
-                    className="bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600"
+                    size="sm"
+                    className="bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 px-3"
                   >
                     <Send className="w-4 h-4" />
                   </Button>
@@ -621,62 +581,72 @@ export default function SmartFarmDashboard() {
           </div>
         </div>
 
-        {/* Estadísticas del Sistema */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+        {/* Estadísticas del Sistema - Grid Responsivo */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-6">
           <Card className="border-0 shadow-lg bg-gradient-to-br from-green-500 to-emerald-600 text-white">
-            <CardContent className="p-6">
+            <CardContent className="p-4 sm:p-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-green-100 text-sm">Mensajes Recibidos</p>
-                  <p className="text-3xl font-bold">{messages.length}</p>
+                  <p className="text-green-100 text-xs sm:text-sm">Mensajes</p>
+                  <p className="text-xl sm:text-3xl font-bold">{messages.length}</p>
                 </div>
-                <Activity className="w-8 h-8 text-green-200" />
+                <Activity className="w-6 h-6 sm:w-8 sm:h-8 text-green-200" />
               </div>
             </CardContent>
           </Card>
 
           <Card className="border-0 shadow-lg bg-gradient-to-br from-blue-500 to-cyan-600 text-white">
-            <CardContent className="p-6">
+            <CardContent className="p-4 sm:p-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-blue-100 text-sm">Sensores Activos</p>
-                  <p className="text-3xl font-bold">{Object.keys(sensorData).length}</p>
+                  <p className="text-blue-100 text-xs sm:text-sm">Sensores</p>
+                  <p className="text-xl sm:text-3xl font-bold">{Object.keys(sensorData).length}/3</p>
                 </div>
-                <Gauge className="w-8 h-8 text-blue-200" />
+                <Gauge className="w-6 h-6 sm:w-8 sm:h-8 text-blue-200" />
               </div>
             </CardContent>
           </Card>
 
           <Card className="border-0 shadow-lg bg-gradient-to-br from-purple-500 to-pink-600 text-white">
-            <CardContent className="p-6">
+            <CardContent className="p-4 sm:p-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-purple-100 text-sm">Estado Sistema</p>
-                  <p className="text-xl font-bold">{isConnected ? "Activo" : "Inactivo"}</p>
+                  <p className="text-purple-100 text-xs sm:text-sm">Estado</p>
+                  <p className="text-sm sm:text-xl font-bold">{isConnected ? "Activo" : "Inactivo"}</p>
                 </div>
                 {isConnected ? (
-                  <Wifi className="w-8 h-8 text-purple-200" />
+                  <Wifi className="w-6 h-6 sm:w-8 sm:h-8 text-purple-200" />
                 ) : (
-                  <WifiOff className="w-8 h-8 text-purple-200" />
+                  <WifiOff className="w-6 h-6 sm:w-8 sm:h-8 text-purple-200" />
                 )}
               </div>
             </CardContent>
           </Card>
 
           <Card className="border-0 shadow-lg bg-gradient-to-br from-orange-500 to-red-600 text-white">
-            <CardContent className="p-6">
+            <CardContent className="p-4 sm:p-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-orange-100 text-sm">Última Actualización</p>
-                  <p className="text-sm font-medium">
+                  <p className="text-orange-100 text-xs sm:text-sm">Última Act.</p>
+                  <p className="text-xs sm:text-sm font-medium">
                     {messages.length > 0 ? messages[0].timestamp.toLocaleTimeString() : "N/A"}
                   </p>
                 </div>
-                <TrendingUp className="w-8 h-8 text-orange-200" />
+                <TrendingUp className="w-6 h-6 sm:w-8 sm:h-8 text-orange-200" />
               </div>
             </CardContent>
           </Card>
         </div>
+
+        {/* Botón flotante para chat en móvil */}
+        {!showChat && (
+          <Button
+            onClick={() => setShowChat(true)}
+            className="lg:hidden fixed bottom-4 right-4 z-50 bg-gradient-to-r from-blue-500 to-purple-500 hover:from-blue-600 hover:to-purple-600 shadow-lg rounded-full w-14 h-14"
+          >
+            <Bot className="w-6 h-6" />
+          </Button>
+        )}
       </div>
     </div>
   )

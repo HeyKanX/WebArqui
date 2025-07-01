@@ -164,46 +164,89 @@ export default function SmartFarmDashboard() {
     }
   }, [])
 
+  const parseSensorString = (sensorString: string) => {
+    console.log(`🔍 Parseando string de sensores: "${sensorString}"`)
+
+    // Verificar si el string tiene el formato correcto H:X,D:X,L:X
+    if (sensorString.includes("H:") && sensorString.includes("D:") && sensorString.includes("L:")) {
+      const newData: Partial<SensorData> = {}
+      const parts = sensorString.split(",")
+
+      parts.forEach((part: string) => {
+        const trimmedPart = part.trim()
+        const [key, value] = trimmedPart.split(":")
+
+        if (key && value) {
+          const numValue = Number.parseFloat(value)
+
+          if (key === "H" && !isNaN(numValue)) {
+            newData.soilHumidity = numValue
+            console.log(`✅ Humedad del suelo: ${numValue}%`)
+          }
+          if (key === "D" && !isNaN(numValue)) {
+            newData.waterDistance = numValue
+            console.log(`✅ Distancia del agua: ${numValue}cm`)
+          }
+          if (key === "L" && !isNaN(numValue)) {
+            newData.ambientLight = numValue
+            console.log(`✅ Luz ambiente: ${numValue}%`)
+          }
+        }
+      })
+
+      return newData
+    }
+
+    return null
+  }
+
   const updateSensorData = (topic: string, message: string) => {
     console.log(`🔍 Procesando mensaje del topic ${topic}:`, message)
 
-    // Parsear formato H:0,D:24,L:5 para ambos topics de sensores
     if (topic === "Sensores/7" || topic === "Sensores/ChatLog") {
-      // Verificar si el mensaje tiene el formato correcto H:X,D:X,L:X
-      if (message.includes("H:") && message.includes("D:") && message.includes("L:")) {
-        console.log(`✅ Formato válido detectado: ${message}`)
+      let sensorDataToUpdate: Partial<SensorData> | null = null
 
-        setSensorData((prev) => {
-          const newData = { ...prev }
-          const parts = message.split(",")
+      if (topic === "Sensores/7") {
+        // Formato simple: H:73,D:23,L:5
+        sensorDataToUpdate = parseSensorString(message)
+      } else if (topic === "Sensores/ChatLog") {
+        try {
+          // Intentar parsear como JSON
+          const jsonData = JSON.parse(message)
+          console.log(`📋 JSON parseado de ChatLog:`, jsonData)
 
-          parts.forEach((part: string) => {
-            const trimmedPart = part.trim()
-            const [key, value] = trimmedPart.split(":")
-
-            if (key && value) {
-              const numValue = Number.parseFloat(value)
-
-              if (key === "H" && !isNaN(numValue)) {
-                newData.soilHumidity = numValue
-                console.log(`✅ Humedad del suelo actualizada: ${numValue}%`)
-              }
-              if (key === "D" && !isNaN(numValue)) {
-                newData.waterDistance = numValue
-                console.log(`✅ Distancia del agua actualizada: ${numValue}cm`)
-              }
-              if (key === "L" && !isNaN(numValue)) {
-                newData.ambientLight = numValue
-                console.log(`✅ Luz ambiente actualizada: ${numValue}%`)
+          // Buscar en el array de mensajes
+          if (jsonData.messages && Array.isArray(jsonData.messages)) {
+            // Buscar el mensaje más reciente que contenga datos de sensores
+            for (let i = jsonData.messages.length - 1; i >= 0; i--) {
+              const msg = jsonData.messages[i]
+              if (typeof msg === "string" && msg.includes("H:") && msg.includes("D:") && msg.includes("L:")) {
+                // Extraer la parte H:X,D:X,L:X del mensaje
+                const match = msg.match(/H:\d+,D:\d+,L:\d+/)
+                if (match) {
+                  console.log(`🎯 Datos de sensores encontrados en ChatLog: ${match[0]}`)
+                  sensorDataToUpdate = parseSensorString(match[0])
+                  break
+                }
               }
             }
-          })
+          }
+        } catch (error) {
+          // Si no es JSON válido, intentar parsear como string simple
+          console.log(`⚠️ No es JSON válido, intentando parseo simple`)
+          sensorDataToUpdate = parseSensorString(message)
+        }
+      }
 
+      // Actualizar el estado si se encontraron datos válidos
+      if (sensorDataToUpdate && Object.keys(sensorDataToUpdate).length > 0) {
+        setSensorData((prev) => {
+          const newData = { ...prev, ...sensorDataToUpdate }
           console.log(`📊 Datos de sensores actualizados:`, newData)
           return newData
         })
       } else {
-        console.log(`⚠️ Formato de mensaje no reconocido: ${message}`)
+        console.log(`⚠️ No se encontraron datos de sensores válidos en: ${message}`)
       }
     }
   }
